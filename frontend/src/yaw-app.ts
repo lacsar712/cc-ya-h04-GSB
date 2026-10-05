@@ -131,6 +131,11 @@ export class YawAlignApp extends LitElement {
   @state() private yawErr = "";
   @state() private error = "";
   @state() private loading = false;
+  @state() private latestCode = "";
+  @state() private latestRow: LogRow | null = null;
+  @state() private latestEmpty = false;
+  @state() private latestError = "";
+  @state() private latestLoading = false;
 
   connectedCallback() {
     super.connectedCallback();
@@ -171,9 +176,47 @@ export class YawAlignApp extends LitElement {
       }
       if (!res.ok) return;
       const data = (await res.json()) as LogRow[];
-      this.logs = [...data].reverse(); /* h04-trap-reverse */
+      // 后端已按 id DESC 返回，最新入队的单据就在顶部
+      this.logs = data;
     } catch {
       /* ignore transient network errors */
+    }
+  }
+
+  private async queryLatest() {
+    const code = this.latestCode.trim();
+    this.latestError = "";
+    this.latestEmpty = false;
+    this.latestRow = null;
+    if (!code) {
+      this.latestError = "请输入机组编号";
+      return;
+    }
+    this.latestLoading = true;
+    try {
+      const res = await fetch(
+        `/api/logs/latest?turbine_code=${encodeURIComponent(code)}`,
+        { headers: this.authHeaders() }
+      );
+      if (res.status === 401) {
+        this.logout();
+        return;
+      }
+      const data = await res.json();
+      if (res.status === 404) {
+        // 该机尚无单据：接口不编造编号，前端也只如实提示
+        this.latestEmpty = true;
+        return;
+      }
+      if (!res.ok) {
+        this.latestError = data.detail || "查询失败";
+        return;
+      }
+      this.latestRow = data as LogRow;
+    } catch {
+      this.latestError = "查询时网络异常";
+    } finally {
+      this.latestLoading = false;
     }
   }
 
@@ -213,6 +256,10 @@ export class YawAlignApp extends LitElement {
     if (this._pollTimer) clearInterval(this._pollTimer);
     this.session = null;
     this.logs = [];
+    this.latestRow = null;
+    this.latestEmpty = false;
+    this.latestError = "";
+    this.latestCode = "";
     localStorage.removeItem("yaw_session");
   }
 
@@ -243,6 +290,10 @@ export class YawAlignApp extends LitElement {
       this.turbineCode = "";
       this.yawErr = "";
       await this.refreshLogs();
+      // 入队瞬间同机最近查询须立刻能捞到新单
+      if (this.latestCode.trim() === data.turbine_code) {
+        await this.queryLatest();
+      }
     } catch {
       this.error = "提交时网络异常";
     } finally {
@@ -323,6 +374,65 @@ export class YawAlignApp extends LitElement {
             </section>
           `
         : null}
+
+      <section>
+        <h2 style="margin-top:0;font-size:1.1rem;">同机最近单据</h2>
+        <div class="row-actions">
+          <input
+            style="width: 9rem;margin-bottom:0;"
+            placeholder="机组编号，例如 W12"
+            .value=${this.latestCode}
+            @input=${(e: Event) =>
+              (this.latestCode = (e.target as HTMLInputElement).value)}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === "Enter") void this.queryLatest();
+            }}
+          />
+          <button
+            class="secondary"
+            ?disabled=${this.latestLoading}
+            @click=${this.queryLatest}
+          >
+            查询最近
+          </button>
+        </div>
+        ${this.latestError ? html`<p class="err">${this.latestError}</p>` : null}
+        ${this.latestEmpty
+          ? html`<p class="sub" style="margin:0.5rem 0 0;">
+              该机尚无任何单据
+            </p>`
+          : null}
+        ${this.latestRow
+          ? html`
+            <table style="margin-top:0.6rem;">
+              <tbody>
+                <tr>
+                  <td>${this.latestRow.id}</td>
+                  <td>${this.latestRow.turbine_code}</td>
+                  <td>${this.latestRow.yaw_err_deg}</td>
+                  <td>
+                    <span
+                      class="tag ${this.latestRow.status === "pending"
+                        ? "pending"
+                        : "ok"}"
+                    >
+                      ${this.latestRow.status === "pending" ? "待处理" : "已完成"}
+                    </span>
+                  </td>
+                  <td>
+                    ${this.latestRow.verdict
+                      ? html`<span class="tag ${this.verdictClass(this.latestRow)}"
+                          >${this.latestRow.verdict}</span
+                        >`
+                      : "—"}
+                  </td>
+                  <td>${this.latestRow.reason ?? "—"}</td>
+                </tr>
+              </tbody>
+            </table>
+          `
+          : null}
+      </section>
 
       <section>
         <h2 style="margin-top:0;font-size:1.1rem;">对中记录</h2>

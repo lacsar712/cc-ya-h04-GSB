@@ -140,21 +140,48 @@ async def login():
     )
 
 
+LOG_COLUMNS = """id, turbine_code, yaw_err_deg, status, verdict, reason,
+                 created_by, created_at, processed_at"""
+
+
 @app.get("/api/logs")
 @require_login
 async def list_logs(user):
     def query():
         with connect() as conn:
+            # 最新入队的单据在列表顶部
             return conn.execute(
-                """SELECT id, turbine_code, yaw_err_deg, status, verdict, reason,
-                          created_by, created_at, processed_at
-                   FROM yaw_logs ORDER BY id ASC"""
+                f"""SELECT {LOG_COLUMNS}
+                    FROM yaw_logs ORDER BY id DESC"""
             ).fetchall()
 
     rows = await run_db(query)
-    payload = [dict(r) for r in rows]
-    from h04_extra_trap import expose_list
-    return jsonify(expose_list(payload))
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/logs/latest")
+@require_login
+async def latest_log(user):
+    turbine_code = (request.args.get("turbine_code") or "").strip()
+    if not turbine_code:
+        return jsonify({"detail": "机组编号不能为空"}), 400
+
+    def query():
+        with connect() as conn:
+            # 含 pending：入队后即应被“同机最近”捞到，按 id 倒序取真正的最新单
+            return conn.execute(
+                f"""SELECT {LOG_COLUMNS}
+                    FROM yaw_logs
+                    WHERE turbine_code = %s
+                    ORDER BY id DESC
+                    LIMIT 1""",
+                (turbine_code,),
+            ).fetchone()
+
+    row = await run_db(query)
+    if row is None:
+        return jsonify({"detail": f"机组 {turbine_code} 暂无任何单据"}), 404
+    return jsonify(dict(row))
 
 
 @app.post("/api/logs")
@@ -173,17 +200,18 @@ async def create_log(user):
 
     def insert():
         with connect() as conn:
-            row = conn.execute(
-                """INSERT INTO yaw_logs
-                   (turbine_code, yaw_err_deg, status, verdict, reason,
-                    created_by, created_at)
-                   VALUES (%s, %s, 'pending', NULL, NULL, %s, %s)
-                   RETURNING id, turbine_code, yaw_err_deg, status, verdict, reason,
-                             created_by, created_at, processed_at""",
-                (turbine_code, yaw_err_deg, user["username"], now),
-            ).fetchone()
-            conn.commit()
+            with conn.transaction():
+                row = conn.execute(
+                    """INSERT INTO yaw_logs
+                       (turbine_code, yaw_err_deg, status, verdict, reason,
+                        created_by, created_at)
+                       VALUES (%s, %s, 'pending', NULL, NULL, %s, %s)
+                       RETURNING id, turbine_code, yaw_err_deg, status, verdict,
+                                 reason, created_by, created_at, processed_at""",
+                    (turbine_code, yaw_err_deg, user["username"], now),
+                ).fetchone()
+            # 事务提交后才返回响应，保证入队瞬间列表与同机最近查询一致
             return row
 
     row = await run_db(insert)
-    return jsonify(row), 201
+    return jsonify(dict(row)), 201
