@@ -8,6 +8,7 @@ from passlib.context import CryptContext
 from quart import Quart, jsonify, request
 
 from db import SCHEMA, connect
+from order_skew import list_order_sql
 from rules import judge
 
 SECRET = os.environ.get("JWT_SECRET", "yaw-align-dev-secret")
@@ -146,15 +147,38 @@ async def list_logs(user):
     def query():
         with connect() as conn:
             return conn.execute(
-                """SELECT id, turbine_code, yaw_err_deg, status, verdict, reason,
+                f"""SELECT id, turbine_code, yaw_err_deg, status, verdict, reason,
                           created_by, created_at, processed_at
-                   FROM yaw_logs ORDER BY id ASC"""
+                   FROM yaw_logs {list_order_sql()}"""
             ).fetchall()
 
     rows = await run_db(query)
-    payload = [dict(r) for r in rows]
-    from h04_extra_trap import expose_list
-    return jsonify(expose_list(payload))
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/logs/latest")
+@require_login
+async def latest_log(user):
+    turbine_code = (request.args.get("turbine_code") or "").strip()
+    if not turbine_code:
+        return jsonify({"detail": "机组编号不能为空"}), 400
+
+    def query():
+        with connect() as conn:
+            return conn.execute(
+                f"""SELECT id, turbine_code, yaw_err_deg, status, verdict, reason,
+                          created_by, created_at, processed_at
+                   FROM yaw_logs
+                   WHERE turbine_code = %s
+                   {list_order_sql()}
+                   LIMIT 1""",
+                (turbine_code,),
+            ).fetchone()
+
+    row = await run_db(query)
+    if row is None:
+        return jsonify({"detail": "该机组暂无偏航记录"}), 404
+    return jsonify(dict(row))
 
 
 @app.post("/api/logs")

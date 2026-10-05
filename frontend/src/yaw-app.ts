@@ -129,6 +129,9 @@ export class YawAlignApp extends LitElement {
   @state() private loginPass = "tech123456";
   @state() private turbineCode = "";
   @state() private yawErr = "";
+  @state() private latestCode = "";
+  @state() private latestResult: LogRow | null = null;
+  @state() private latestMsg = "";
   @state() private error = "";
   @state() private loading = false;
 
@@ -171,7 +174,7 @@ export class YawAlignApp extends LitElement {
       }
       if (!res.ok) return;
       const data = (await res.json()) as LogRow[];
-      this.logs = [...data].reverse(); /* h04-trap-reverse */
+      this.logs = data; // 服务端已按 id DESC 返回，新记录置顶，不再二次倒置
     } catch {
       /* ignore transient network errors */
     }
@@ -250,6 +253,37 @@ export class YawAlignApp extends LitElement {
     }
   }
 
+  private async queryLatest() {
+    this.latestMsg = "";
+    this.latestResult = null;
+    const code = this.latestCode.trim();
+    if (!code) {
+      this.latestMsg = "请输入机组编号";
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/logs/latest?turbine_code=${encodeURIComponent(code)}`,
+        { headers: this.authHeaders() }
+      );
+      if (res.status === 401) {
+        this.logout();
+        return;
+      }
+      if (res.status === 404) {
+        this.latestMsg = "该机组暂无偏航记录";
+        return;
+      }
+      if (!res.ok) {
+        this.latestMsg = "查询失败";
+        return;
+      }
+      this.latestResult = (await res.json()) as LogRow;
+    } catch {
+      this.latestMsg = "查询时网络异常";
+    }
+  }
+
   private verdictClass(row: LogRow) {
     if (row.status === "pending") return "pending";
     if (row.verdict === "合格") return "ok";
@@ -323,6 +357,31 @@ export class YawAlignApp extends LitElement {
             </section>
           `
         : null}
+
+      <section>
+        <h2 style="margin-top:0;font-size:1.1rem;">同机最近记录</h2>
+        <label>机组编号</label>
+        <input
+          placeholder="例如 W07"
+          .value=${this.latestCode}
+          @input=${(e: Event) =>
+            (this.latestCode = (e.target as HTMLInputElement).value)}
+        />
+        <button ?disabled=${this.loading} @click=${this.queryLatest}>
+          查最近
+        </button>
+        ${this.latestMsg ? html`<p class="err">${this.latestMsg}</p>` : null}
+        ${this.latestResult
+          ? html`<p>
+              最近一条：#${this.latestResult.id} ·
+              ${this.latestResult.turbine_code} ·
+              ${this.latestResult.yaw_err_deg}° ·
+              ${this.latestResult.status === "pending"
+                ? "待处理"
+                : this.latestResult.verdict}
+            </p>`
+          : null}
+      </section>
 
       <section>
         <h2 style="margin-top:0;font-size:1.1rem;">对中记录</h2>
